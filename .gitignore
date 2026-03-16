@@ -17,8 +17,32 @@ upload_log.json
 generated_copy.json
 .telegram_offset
 
+# OpenClaw runtime (secrets, sessions, logs, state)
+.openclaw/openclaw.json.bak*
+.openclaw/agents/
+.openclaw/canvas/
+.openclaw/completions/
+.openclaw/credentials/
+.openclaw/cron/
+.openclaw/delivery-queue/
+.openclaw/devices/
+.openclaw/identity/
+.openclaw/logs/
+.openclaw/memory/
+.openclaw/sandbox/
+.openclaw/sandboxes/
+.openclaw/skills/
+.openclaw/telegram/
+.openclaw/update-check.json
+.openclaw/workspace/.git/
+.openclaw/workspace/.clawhub/
+.openclaw/workspace/.openclaw/
+.openclaw/workspace/memory/
+
 # macOS
 .DS_Store
 
 # Ads output
 ads/
+output/
+output.txt

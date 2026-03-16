@@ -8,6 +8,8 @@ and CTR is about to drop. Flag and alert before the CPA pain hits.
 import csv
 from dataclasses import dataclass
 
+from config import settings
+
 
 FREQUENCY_DANGER = 3.5      # audience fatigue threshold
 FREQUENCY_WARNING = 3.0     # early warning zone
@@ -161,15 +163,12 @@ def run_frequency_audit(ads: list[AdMetrics]) -> None:
 
 
 if __name__ == "__main__":
-    import os
-
-    use_live = os.getenv("META_ACCESS_TOKEN") and os.getenv("META_AD_ACCOUNT_ID")
-
-    if use_live:
+    if settings.has_meta:
         print("Pulling live data from Meta Marketing API...")
+        settings.require_meta()
         ads = load_meta_api_data(
-            ad_account_id=os.environ["META_AD_ACCOUNT_ID"],
-            access_token=os.environ["META_ACCESS_TOKEN"],
+            ad_account_id=settings.meta_ad_account_id,
+            access_token=settings.meta_access_token,
         )
     else:
         print("Using sample data (set META_ACCESS_TOKEN + META_AD_ACCOUNT_ID to go live).")

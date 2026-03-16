@@ -9,8 +9,9 @@ Step 4: Write New Ad Copy from Winners
 
 import csv
 import json
-import os
 from dataclasses import dataclass
+
+from config import settings
 
 
 GEMINI_MODEL    = "gemini-3.1-pro-preview"
@@ -112,16 +113,14 @@ Return ONLY a JSON array in this exact format, no markdown fences:
 
 def generate_copy_variants(winners: list[AdWithCopy]) -> list[dict]:
     """Call Gemini API to generate copy variants. Falls back to mock if no API key."""
-    api_key = os.getenv("GEMINI_API_KEY")
-
-    if not api_key:
+    if not settings.has_gemini:
         print("  [INFO] No GEMINI_API_KEY found — returning mock variants.")
         return _mock_variants()
 
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(api_key=settings.gemini_api_key)
     response = client.models.generate_content(
         model=GEMINI_MODEL,
         contents=build_prompt(winners),
@@ -196,16 +195,14 @@ Return ONLY a JSON array, no markdown fences:
 
 def generate_content_concepts(winners: list[AdWithCopy]) -> list[dict]:
     """Spot patterns across winners and suggest what to test next."""
-    api_key = os.getenv("GEMINI_API_KEY")
-
-    if not api_key:
+    if not settings.has_gemini:
         print("  [INFO] No GEMINI_API_KEY found — returning mock concepts.")
         return _mock_concepts()
 
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(api_key=settings.gemini_api_key)
     response = client.models.generate_content(
         model=GEMINI_MODEL,
         contents=build_concepts_prompt(winners),

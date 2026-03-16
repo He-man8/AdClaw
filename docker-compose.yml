@@ -1,0 +1,83 @@
+services:
+  openclaw-gateway:
+    build: .
+    image: adclaw:local
+    environment:
+      HOME: /home/node
+      TERM: xterm-256color
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
+      OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      META_ACCESS_TOKEN: ${META_ACCESS_TOKEN:-}
+      META_AD_ACCOUNT_ID: ${META_AD_ACCOUNT_ID:-}
+      META_ADSET_ID: ${META_ADSET_ID:-}
+      META_PAGE_ID: ${META_PAGE_ID:-}
+      COMPOSIO_MCP_URL: ${COMPOSIO_MCP_URL:-}
+      COMPOSIO_MCP_API_KEY: ${COMPOSIO_MCP_API_KEY:-}
+      POSTHOG_API_KEY: ${POSTHOG_API_KEY:-}
+      POSTHOG_HOST: ${POSTHOG_HOST:-}
+      POSTHOG_PROJECT_ID: ${POSTHOG_PROJECT_ID:-}
+      TZ: ${OPENCLAW_TZ:-UTC}
+    volumes:
+      - ./.openclaw:/home/node/.openclaw
+      - ./.openclaw/workspace:/home/node/.openclaw/workspace
+      - ./skills:/home/node/.openclaw/skills
+      - .:/Users/aiteam1/Code/AdClaw
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "0"
+    ports:
+      - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
+      - "${OPENCLAW_BRIDGE_PORT:-18790}:18790"
+    init: true
+    restart: unless-stopped
+    command:
+      [
+        "node",
+        "dist/index.js",
+        "gateway",
+        "--bind",
+        "${OPENCLAW_GATEWAY_BIND:-lan}",
+        "--port",
+        "18789",
+      ]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  openclaw-cli:
+    image: adclaw:local
+    network_mode: "service:openclaw-gateway"
+    cap_drop:
+      - NET_RAW
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      HOME: /home/node
+      TERM: xterm-256color
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
+      OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-}
+      BROWSER: echo
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TZ: ${OPENCLAW_TZ:-UTC}
+    volumes:
+      - ./.openclaw:/home/node/.openclaw
+      - ./.openclaw/workspace:/home/node/.openclaw/workspace
+    stdin_open: true
+    tty: true
+    init: true
+    entrypoint: ["node", "dist/index.js"]
+    depends_on:
+      - openclaw-gateway

@@ -11,6 +11,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from config import settings
+
 
 COPY_FILE      = Path("generated_copy.json")
 UPLOAD_LOG     = Path("upload_log.json")
@@ -96,8 +98,13 @@ def publish_ad(
     return result
 
 
-def activate_ad(ad_id: str) -> None:
+def activate_ad(ad_id: str, dry_run: bool = True) -> None:
     """Activate a staged ad after human approval."""
+    if dry_run or ad_id.startswith("ad_mock_"):
+        print(f"  [DRY RUN] Would activate {ad_id} → ACTIVE")
+        print(f"  [ACTIVATED] {ad_id} (simulated — no live API credentials)")
+        return
+
     subprocess.run(
         ["social", "marketing", "ad", "update",
          "--ad-id", ad_id, "--status", "ACTIVE"],
@@ -146,10 +153,14 @@ def run_publisher(
 if __name__ == "__main__":
     import sys
 
+    live = "--live" in sys.argv
+
     # simple activate flow: python3 ad_publisher.py --activate <ad_id>
-    if len(sys.argv) == 3 and sys.argv[1] == "--activate":
-        activate_ad(sys.argv[2])
+    if len(sys.argv) >= 3 and sys.argv[1] == "--activate":
+        activate_ad(sys.argv[2], dry_run=not live)
     else:
-        adset_id = os.getenv("META_ADSET_ID", "YOUR_ADSET_ID") if False else "YOUR_ADSET_ID"
-        page_id  = os.getenv("META_PAGE_ID",  "YOUR_PAGE_ID")  if False else "YOUR_PAGE_ID"
-        run_publisher(adset_id=adset_id, page_id=page_id, dry_run=True)
+        run_publisher(
+            adset_id=settings.meta_adset_id,
+            page_id=settings.meta_page_id,
+            dry_run=not live,
+        )

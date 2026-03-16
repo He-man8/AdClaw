@@ -142,8 +142,8 @@ def recommend_budget_shifts(
     state: dict,
 ) -> list[dict]:
     """
-    Freed budget from paused ads → recommend shifting to top performer.
-    Never exceed +20% of current budget per cycle.
+    Freed budget from paused ads → distribute across top 3 performers,
+    weighted by efficiency score. Never exceed +20% per ad per cycle.
     """
     freed = sum(a.daily_budget for a in paused)
     if freed == 0:
@@ -160,23 +160,46 @@ def recommend_budget_shifts(
     if not active:
         return []
 
+    # rank by efficiency, take top 3
     active.sort(key=lambda a: a.efficiency_score, reverse=True)
-    winner = active[0]
+    top_performers = active[:3]
 
-    max_increase = winner.daily_budget * MAX_BUDGET_SCALE_PCT
-    shift_amount = min(freed, max_increase)
-    new_budget = winner.daily_budget + shift_amount
+    # weight distribution by efficiency score
+    total_score = sum(a.efficiency_score for a in top_performers)
+    if total_score == 0:
+        return []
 
-    return [{
-        "ad_id": winner.ad_id,
-        "ad_name": winner.ad_name,
-        "campaign": winner.campaign,
-        "current_budget": winner.daily_budget,
-        "shift_amount": round(shift_amount, 2),
-        "new_budget": round(new_budget, 2),
-        "efficiency_score": winner.efficiency_score,
-        "reason": f"Top efficiency score {winner.efficiency_score}. Freed ${freed:.2f}/day from paused ads.",
-    }]
+    shifts = []
+    remaining_freed = freed
+
+    for ad in top_performers:
+        if remaining_freed <= 0:
+            break
+
+        weight = ad.efficiency_score / total_score
+        proposed_shift = freed * weight
+        max_increase = ad.daily_budget * MAX_BUDGET_SCALE_PCT
+        shift_amount = min(proposed_shift, max_increase, remaining_freed)
+
+        if shift_amount < 1:  # skip trivial amounts
+            continue
+
+        new_budget = ad.daily_budget + shift_amount
+        remaining_freed -= shift_amount
+
+        shifts.append({
+            "ad_id": ad.ad_id,
+            "ad_name": ad.ad_name,
+            "campaign": ad.campaign,
+            "current_budget": ad.daily_budget,
+            "shift_amount": round(shift_amount, 2),
+            "new_budget": round(new_budget, 2),
+            "efficiency_score": ad.efficiency_score,
+            "weight_pct": round(weight * 100, 1),
+            "reason": f"Efficiency score {ad.efficiency_score} ({weight * 100:.0f}% weight). Freed ${freed:.2f}/day total.",
+        })
+
+    return shifts
 
 
 def apply_actions(

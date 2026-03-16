@@ -1,27 +1,28 @@
 """
-Orchestrator — runs all 6 steps in sequence
+Orchestrator — runs all agents in sequence
 ---------------------------------------------
-Input : sample_data.csv (or live Meta API)
-Output: paused bleeders, budget shifts, new copy, staged ads, morning brief
+Coordinates: health_check → budget_guardian → copy_writer → content_lab → ad_publisher → morning_brief
+
+Input : sample_data.csv, live Google Ads via Composio, or PostHog data warehouse
+Output: paused bleeders, budget shifts, new copy, test hypotheses, staged ads, morning brief
 
 Usage:
-  python3 orchestrator.py               # dry run, sample data
-  python3 orchestrator.py --live        # live Meta API + real actions
+  python3 orchestrator.py                  # dry run, sample data
+  python3 orchestrator.py --live           # live Google Ads via Composio (dry run publish)
+  python3 orchestrator.py --posthog        # live Google Ads via PostHog data warehouse
+  python3 orchestrator.py --posthog --publish  # PostHog data + actually publish ads
 """
 
-import os
 import sys
 from datetime import datetime, timezone
-from dotenv import load_dotenv
 
-load_dotenv()  # loads .env from current directory
-
-# local modules
-from frequency_monitor import load_sample_data as load_freq_data, run_frequency_audit
-from budget_guardian    import load_sample_data as load_guardian_data, run_budget_guardian, print_guardian_report
-from copy_writer        import load_winners_from_csv, generate_copy_variants, generate_content_concepts, print_copy_report
-from ad_publisher       import run_publisher
-from morning_brief      import build_brief, deliver_brief
+from config import settings
+from health_check import load_sample_data as load_health_data, run_health_check
+from budget_guardian import load_sample_data as load_guardian_data, run_budget_guardian, print_guardian_report
+from copy_writer import load_winners_from_csv, generate_copy_variants, print_copy_report
+from content_lab import load_all_ads, run_content_lab
+from ad_publisher import run_publisher
+from morning_brief import build_brief, deliver_brief
 
 
 SAMPLE_FILE = "sample_data.csv"
@@ -33,47 +34,54 @@ def banner(step: int, title: str) -> None:
     print(f"{'━' * 60}")
 
 
-def run(live: bool = False, dry_run: bool = True) -> None:
+def run(live: bool = False, posthog: bool = False, dry_run: bool = True) -> None:
     start = datetime.now(timezone.utc)
-    print(f"\n🦞  OPENCLAW ADS AGENT  —  {start.strftime('%Y-%m-%d %H:%M UTC')}")
-    print(f"    Mode: {'LIVE' if live else 'DRY RUN / SAMPLE DATA'}\n")
+    mode = "POSTHOG" if posthog else "LIVE" if live else "DRY RUN / SAMPLE DATA"
+    print(f"\n🦞  ADCLAW AUTONOMOUS ADS AGENT  —  {start.strftime('%Y-%m-%d %H:%M UTC')}")
+    print(f"    Mode: {mode}\n")
 
-    # ── Step 1: Load data ──────────────────────────────────────────
-    banner(1, "DAILY HEALTH CHECK — LOAD AD DATA")
-    if live:
-        from frequency_monitor import load_meta_api_data
-        ads_freq = load_meta_api_data(
-            ad_account_id=os.environ["META_AD_ACCOUNT_ID"],
-            access_token=os.environ["META_ACCESS_TOKEN"],
-        )
-        print(f"  Pulled {len(ads_freq)} ads from Meta API.")
+    # ── Pre-fetch live data ───────────────────────────────────────
+    composio_data = None
+    if posthog:
+        from posthog_fetch import load_posthog_data
+        print("  Fetching live data from Google Ads via PostHog...")
+        composio_data = load_posthog_data()
+        print(f"  Pulled {len(composio_data['raw'])} campaigns from PostHog.")
+    elif live:
+        from composio_fetch import load_composio_data
+        print("  Fetching live data from Google Ads via Composio...")
+        composio_data = load_composio_data()
+        print(f"  Pulled {len(composio_data['raw'])} campaigns from Composio.")
+
+    # ── Step 1: Health Check ─────────────────────────────────────
+    banner(1, "DAILY HEALTH CHECK")
+    if composio_data:
+        ads_health = composio_data["health"]
+        print(f"  Using {len(ads_health)} ads from Composio.")
     else:
-        ads_freq = load_freq_data(SAMPLE_FILE)
-        print(f"  Loaded {len(ads_freq)} ads from {SAMPLE_FILE}.")
+        ads_health = load_health_data(SAMPLE_FILE)
+        print(f"  Loaded {len(ads_health)} ads from {SAMPLE_FILE}.")
 
-    # ── Step 2: Frequency audit ────────────────────────────────────
-    banner(2, "CATCH DYING ADS — FREQUENCY MONITOR")
-    run_frequency_audit(ads_freq)
+    health_report = run_health_check(ads_health, live=live)
 
-    danger_ads = [a for a in ads_freq if a.is_audience_cooked]
+    danger_ads = health_report["danger"]
     freq_dicts = [
         {
-            "ad_id": a.ad_id,
-            "ad_name": a.ad_name,
-            "frequency": a.frequency,
-            "ctr": a.ctr,
-            "cpa": a.cpa,
+            "ad_id": a["ad_id"],
+            "ad_name": a["ad_name"],
+            "frequency": a["frequency"],
+            "ctr": a["ctr"],
+            "cpa": a["cpa"],
         }
         for a in danger_ads
     ]
 
-    # ── Step 3: Budget guardian ────────────────────────────────────
-    banner(3, "AUTO-PAUSE BLEEDERS + SHIFT BUDGET")
-    ads_guardian = load_guardian_data(SAMPLE_FILE)
+    # ── Step 2: Budget Guardian ──────────────────────────────────
+    banner(2, "AUTO-PAUSE BLEEDERS + SHIFT BUDGET")
+    ads_guardian = composio_data["guardian"] if composio_data else load_guardian_data(SAMPLE_FILE)
     guardian_result = run_budget_guardian(ads_guardian, dry_run=dry_run)
     print_guardian_report(guardian_result, ads_guardian)
 
-    # serialise dataclass list for brief
     guardian_brief = {
         "paused": [
             {
@@ -86,31 +94,45 @@ def run(live: bool = False, dry_run: bool = True) -> None:
         "shifts": guardian_result["shifts"],
     }
 
-    # ── Step 4: Copy generation + content concepts ─────────────────
-    banner(4, "WRITE NEW AD COPY FROM WINNERS")
-    winners  = load_winners_from_csv(SAMPLE_FILE)
+    # ── Step 3: Copy Generation ──────────────────────────────────
+    banner(3, "WRITE NEW AD COPY FROM WINNERS")
+    winners = composio_data["copy_writer"] if composio_data else load_winners_from_csv(SAMPLE_FILE)
     variants = generate_copy_variants(winners)
-    concepts = generate_content_concepts(winners)
-    print_copy_report(winners, variants, concepts)
+    # Content Lab now owns hypothesis generation — skip copy_writer concepts
+    print_copy_report(winners, variants, [])
 
-    # ── Step 5: Upload staged ads ──────────────────────────────────
+    # ── Step 4: Content Lab ──────────────────────────────────────
+    banner(4, "CONTENT LAB — PATTERN ANALYSIS")
+    all_ads = composio_data["content_lab"] if composio_data else load_all_ads(SAMPLE_FILE)
+    lab_result = run_content_lab(all_ads)
+
+    # ── Step 5: Upload Staged Ads ────────────────────────────────
     banner(5, "STAGE ADS FOR UPLOAD")
-    adset_id = os.getenv("META_ADSET_ID", "YOUR_ADSET_ID")
-    page_id  = os.getenv("META_PAGE_ID",  "YOUR_PAGE_ID")
+    adset_id = settings.meta_adset_id
+    page_id = settings.meta_page_id
     upload_results = run_publisher(
         adset_id=adset_id,
         page_id=page_id,
         dry_run=dry_run,
     )
 
-    # ── Step 6: Morning brief ──────────────────────────────────────
+    # ── Step 6: Morning Brief ────────────────────────────────────
     banner(6, "MORNING BRIEF — DELIVER SUMMARY")
+
+    # load health history for WoW comparison
+    import json as _json
+    from pathlib import Path as _Path
+    _history_path = _Path("output/health_history.json")
+    _health_history = _json.loads(_history_path.read_text()) if _history_path.exists() else None
+
     brief = build_brief(
         frequency_results=freq_dicts,
         guardian_results=guardian_brief,
         copy_variants=variants,
-        content_concepts=concepts,
+        content_concepts=lab_result.get("hypotheses", []),
         upload_results=upload_results,
+        health_report=health_report,
+        health_history=_health_history,
     )
     deliver_brief(brief)
 
@@ -119,6 +141,7 @@ def run(live: bool = False, dry_run: bool = True) -> None:
 
 
 if __name__ == "__main__":
-    live     = "--live"     in sys.argv
-    dry_run  = "--live" not in sys.argv   # live mode applies real actions
-    run(live=live, dry_run=dry_run)
+    live = "--live" in sys.argv
+    posthog = "--posthog" in sys.argv
+    dry_run = "--publish" not in sys.argv
+    run(live=live, posthog=posthog, dry_run=dry_run)
