@@ -21,9 +21,11 @@ Activate this skill when the user says any of:
 - "ads report"
 - "tell me about my google ad campaign"
 - "google ads"
+- "meta ads" / "check my meta ads"
 - "get my campaigns"
 - "list campaigns"
 - "what's my ad spend"
+- "meta ads through posthog" / "meta campaigns from posthog"
 - "pause bleeders"
 - "write new ads" / "generate copy"
 - "what should I test?"
@@ -35,32 +37,38 @@ All commands must be run from: `/Users/aiteam1/Code/AdClaw`
 
 ## Steps
 
-### Step 1 — Handle Google Ads specific queries
+### Step 1 — Handle Google Ads or Meta Ads specific queries
 
-If the user is asking specifically about Google Ads data (e.g. "tell me about my google ad campaign", "list campaigns", "get my campaigns", "what's my ad spend"):
+If the user is asking specifically about ads data (e.g. "tell me about my google ad campaign", "check my meta ads", "list campaigns", "meta ads through posthog", "what's my ad spend"):
 
-**Option A (PREFERRED) — PostHog data warehouse (full campaign metrics):**
+**Option A (PREFERRED) — PostHog data warehouse (Google + Meta campaigns):**
 ```bash
 cd /Users/aiteam1/Code/AdClaw && python3 posthog_fetch.py
 ```
-This queries the `googleads.*` tables in PostHog's data warehouse and returns campaign-level metrics: spend, CPA, CTR, impressions, clicks, conversions, budget, and status.
+This queries both Google Ads (`googleads.*`) and Meta Ads (`*metaads_*`) tables in PostHog's data warehouse and returns campaign-level metrics: spend, CPA, CTR, impressions, clicks, frequency, and status. Output shows `[google]` or `[meta]` platform tags.
 
-**Option B — PostHog with custom lookback:**
+**Option B — Google Ads only or Meta Ads only:**
+```bash
+cd /Users/aiteam1/Code/AdClaw && python3 posthog_fetch.py --google-only
+cd /Users/aiteam1/Code/AdClaw && python3 posthog_fetch.py --meta-only
+```
+
+**Option C — PostHog with custom lookback:**
 ```bash
 cd /Users/aiteam1/Code/AdClaw && python3 posthog_fetch.py --days 30
 ```
 
-**Option C — Ad-hoc HogQL query:**
+**Option D — Ad-hoc HogQL query:**
 ```bash
 cd /Users/aiteam1/Code/AdClaw && python3 posthog_fetch.py --query "SELECT campaign_name, campaign_status FROM googleads.mainaccount.campaign WHERE campaign_status = 'ENABLED'"
 ```
 
-**Option D — PostHog dashboard tile:**
+**Option E — PostHog dashboard tile:**
 ```bash
 cd /Users/aiteam1/Code/AdClaw && python3 posthog_fetch.py --insight HhIhTO58
 ```
 
-**Option E — Composio MCP (fallback, limited to audience lists):**
+**Option F — Composio MCP (fallback, limited to audience lists):**
 ```bash
 cd /Users/aiteam1/Code/AdClaw && python3 composio_fetch.py
 ```

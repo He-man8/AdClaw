@@ -1,20 +1,25 @@
 """
-PostHog Google Ads Integration
--------------------------------
-Fetches Google Ads campaign data from PostHog's data warehouse
-(googleads.* tables) via HogQL queries and the insights API.
+PostHog Ads Integration (Google Ads + Meta Ads)
+-------------------------------------------------
+Fetches campaign data from PostHog's data warehouse via HogQL queries
+and the insights API.
 
-PostHog has the full Google Ads data warehouse synced, including:
-  - googleads.mainaccount.campaign — campaign metadata, budget, target CPA
-  - googleads.mainaccount.ad_group — ad group names, targeting
-  - googleads.mainaccount.ad_stats — full metrics (CTR, CPC, spend, conversions)
+Google Ads tables:
+  - googleads.mainaccount.campaign / ad_group / ad_stats
   - googleads.mainaccount2.* — second account (same schema)
 
+Meta Ads tables (4 accounts: mainaccount, chaishots, chaishots4, meta3account):
+  - {account}metaads_campaigns — campaign metadata, budget, status
+  - {account}metaads_campaign_stats — daily metrics (spend, CTR, frequency, reach)
+  - {account}metaads_ad_stats / adset_stats — ad and adset level metrics
+
 Modes:
-  python3 posthog_fetch.py                              # campaign summary (last 7 days)
+  python3 posthog_fetch.py                              # all campaigns (last 7 days)
   python3 posthog_fetch.py --query "SELECT ..."         # ad-hoc HogQL
   python3 posthog_fetch.py --insight HhIhTO58           # fetch a dashboard tile
   python3 posthog_fetch.py --days 30                    # change lookback window
+  python3 posthog_fetch.py --meta-only                  # Meta Ads campaigns only
+  python3 posthog_fetch.py --google-only                # Google Ads campaigns only
 
 All operations are read-only.
 """
@@ -33,7 +38,11 @@ REQUEST_TIMEOUT = 30
 
 # ── Google Ads tables in PostHog data warehouse ──────────────
 # Both mainaccount and mainaccount2 have the same schema.
-ACCOUNTS = ["mainaccount", "mainaccount2"]
+GOOGLE_ACCOUNTS = ["mainaccount", "mainaccount2"]
+
+# ── Meta Ads tables in PostHog data warehouse ─────────────────
+# 4 Meta ad accounts synced as {account}metaads_* tables.
+META_ACCOUNTS = ["mainaccount", "chaishots", "chaishots4", "meta3account"]
 
 # Known dashboard tile short_ids for Google Ads
 TILES = {
@@ -159,18 +168,76 @@ def fetch_campaign_data(days: int = 7) -> list[dict]:
     settings.require_posthog()
     all_campaigns = []
 
-    for account in ACCOUNTS:
+    for account in GOOGLE_ACCOUNTS:
         query = CAMPAIGN_METRICS_QUERY.format(account=account, days=days)
         try:
             result = run_hogql_query(query)
             columns = result["columns"]
             for row in result["rows"]:
                 campaign = dict(zip(columns, row))
+                campaign["platform"] = "google"
                 all_campaigns.append(campaign)
         except Exception as e:
-            logger.warning("Failed to fetch from %s: %s", account, e)
+            logger.warning("Failed to fetch Google from %s: %s", account, e)
 
-    logger.info("Fetched %d campaigns from PostHog", len(all_campaigns))
+    logger.info("Fetched %d Google campaigns from PostHog", len(all_campaigns))
+    return all_campaigns
+
+
+# ── Meta Ads campaign query ───────────────────────────────────
+
+META_CAMPAIGN_METRICS_QUERY = """
+SELECT
+    c.id AS campaign_id,
+    c.name AS campaign_name,
+    c.effective_status AS campaign_status,
+    c.objective AS channel_type,
+    round(toFloat(coalesce(c.daily_budget, '0')), 2) AS daily_budget,
+    0 AS target_cpa,
+    round(SUM(toFloat(s.spend)), 2) AS spend,
+    SUM(toInt(s.impressions)) AS impressions,
+    SUM(toInt(s.clicks)) AS clicks,
+    CASE WHEN SUM(toInt(s.impressions)) > 0
+         THEN round(SUM(toInt(s.clicks)) * 100.0 / SUM(toInt(s.impressions)), 4)
+         ELSE 0 END AS ctr,
+    0 AS conversions,
+    0 AS cpa,
+    CASE WHEN SUM(toInt(s.impressions)) > 0
+         THEN round(SUM(toInt(s.impressions)) / COUNT(DISTINCT s.date_start), 2)
+         ELSE 0 END AS avg_daily_impressions,
+    COUNT(DISTINCT s.date_start) AS days_active,
+    round(AVG(toFloat(s.frequency)), 2) AS meta_frequency,
+    SUM(toInt(s.reach)) AS meta_reach,
+    '{account}' AS account
+FROM {account}metaads_campaign_stats s
+JOIN {account}metaads_campaigns c ON s.campaign_id = c.id
+WHERE s.date_start >= toString(today() - interval {days} day)
+GROUP BY c.id, c.name, c.effective_status, c.daily_budget, c.objective
+ORDER BY spend DESC
+"""
+
+
+def fetch_meta_campaign_data(days: int = 7) -> list[dict]:
+    """
+    Fetch campaign-level metrics from all Meta Ads accounts
+    in PostHog's data warehouse.
+    """
+    settings.require_posthog()
+    all_campaigns = []
+
+    for account in META_ACCOUNTS:
+        query = META_CAMPAIGN_METRICS_QUERY.format(account=account, days=days)
+        try:
+            result = run_hogql_query(query)
+            columns = result["columns"]
+            for row in result["rows"]:
+                campaign = dict(zip(columns, row))
+                campaign["platform"] = "meta"
+                all_campaigns.append(campaign)
+        except Exception as e:
+            logger.warning("Failed to fetch Meta from %s: %s", account, e)
+
+    logger.info("Fetched %d Meta campaigns from PostHog", len(all_campaigns))
     return all_campaigns
 
 
@@ -271,11 +338,13 @@ def to_ad_with_copy(raw_campaigns: list[dict]) -> list:
 
 def _estimate_frequency(raw: dict) -> float:
     """
-    Estimate ad frequency from impressions and days active.
-    Google Ads doesn't expose frequency directly at campaign level;
-    we approximate as avg_daily_impressions / assumed_unique_reach.
-    A rough proxy: impressions / (clicks * 50) if clicks > 0, else 1.0.
+    Return ad frequency. Meta provides it natively; for Google Ads we
+    estimate from impressions / (clicks * 50).
     """
+    if raw.get("platform") == "meta":
+        freq = _float(raw, "meta_frequency", default=0)
+        if freq > 0:
+            return round(freq, 2)
     impressions = _float(raw, "impressions", "avg_daily_impressions", default=0)
     clicks = _float(raw, "clicks", default=0)
     if clicks > 0 and impressions > 0:
@@ -286,9 +355,18 @@ def _estimate_frequency(raw: dict) -> float:
 
 # ── Entry points ─────────────────────────────────────────────
 
-def load_posthog_data(days: int = 7) -> dict:
-    """Fetch all campaign data from PostHog, return converted dataclass lists."""
-    raw = fetch_campaign_data(days=days)
+def load_posthog_data(days: int = 7, platform: str = "all") -> dict:
+    """Fetch campaign data from PostHog (Google + Meta), return converted dataclass lists.
+
+    Args:
+        days: Lookback window in days.
+        platform: "all" (default), "google", or "meta".
+    """
+    raw = []
+    if platform in ("all", "google"):
+        raw.extend(fetch_campaign_data(days=days))
+    if platform in ("all", "meta"):
+        raw.extend(fetch_meta_campaign_data(days=days))
     return {
         "health": to_ad_health(raw),
         "guardian": to_ad_metrics(raw),
@@ -326,17 +404,26 @@ if __name__ == "__main__":
             if idx + 1 < len(sys.argv):
                 days = int(sys.argv[idx + 1])
 
-        data = load_posthog_data(days=days)
-        print(f"\nCampaigns fetched: {len(data['raw'])}")
+        platform = "all"
+        if "--meta-only" in sys.argv:
+            platform = "meta"
+        elif "--google-only" in sys.argv:
+            platform = "google"
+
+        data = load_posthog_data(days=days, platform=platform)
+        google_count = sum(1 for c in data["raw"] if c.get("platform") == "google")
+        meta_count = sum(1 for c in data["raw"] if c.get("platform") == "meta")
+        print(f"\nCampaigns fetched: {len(data['raw'])} (Google: {google_count}, Meta: {meta_count})")
         print(f"  Health entries:    {len(data['health'])}")
         print(f"  Guardian entries:  {len(data['guardian'])}")
         print(f"  Content lab:       {len(data['content_lab'])}")
         print(f"  Copy writer:       {len(data['copy_writer'])}")
         print()
-        for camp in data["raw"][:10]:
+        for camp in data["raw"][:15]:
+            plat = camp.get("platform", "?")[:6]
             status = camp.get("campaign_status", "?")
-            name = camp.get("campaign_name", "?")[:60]
+            name = camp.get("campaign_name", "?")[:55]
             spend = camp.get("spend", 0)
             cpa = camp.get("cpa", 0)
             ctr = camp.get("ctr", 0)
-            print(f"  [{status:8s}] {name:60s}  spend=INR {spend:>10,.2f}  CPA={cpa:>8,.2f}  CTR={ctr:.2f}%")
+            print(f"  [{plat:6s}] [{status:8s}] {name:55s}  spend=INR {spend:>10,.2f}  CPA={cpa:>8,.2f}  CTR={ctr:.2f}%")

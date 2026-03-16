@@ -34,10 +34,7 @@ generated_copy.json
 .openclaw/skills/
 .openclaw/telegram/
 .openclaw/update-check.json
-.openclaw/workspace/.git/
-.openclaw/workspace/.clawhub/
-.openclaw/workspace/.openclaw/
-.openclaw/workspace/memory/
+.openclaw/workspace/
 
 # macOS
 .DS_Store
