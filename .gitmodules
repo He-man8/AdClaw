@@ -1,0 +1,3 @@
+[submodule "vendor/autoresearch-macos"]
+	path = vendor/autoresearch-macos
+	url = https://github.com/miolini/autoresearch-macos

@@ -184,6 +184,58 @@ def fetch_campaign_data(days: int = 7) -> list[dict]:
     return all_campaigns
 
 
+GOOGLE_AD_METRICS_QUERY = """
+SELECT
+    ag.ad_group_id AS ad_id,
+    ag.ad_group_name AS ad_name,
+    c.campaign_id,
+    c.campaign_name,
+    c.campaign_status,
+    c.campaign_advertising_channel_type AS ad_format,
+    round(SUM(toFloat(s.metrics_cost_micros)) / 1000000, 2) AS spend,
+    SUM(s.metrics_impressions) AS impressions,
+    SUM(s.metrics_clicks) AS clicks,
+    CASE WHEN SUM(s.metrics_impressions) > 0
+         THEN round(SUM(s.metrics_clicks) / SUM(s.metrics_impressions) * 100, 4)
+         ELSE 0 END AS ctr,
+    round(SUM(s.metrics_conversions), 2) AS conversions,
+    CASE WHEN SUM(s.metrics_conversions) > 0
+         THEN round(SUM(toFloat(s.metrics_cost_micros)) / 1000000 / SUM(s.metrics_conversions), 2)
+         ELSE 0 END AS cpa,
+    COUNT(DISTINCT s.segments_date) AS days_active,
+    '{account}' AS account
+FROM googleads.{account}.ad_stats s
+JOIN googleads.{account}.ad_group ag ON s.ad_group_id = ag.ad_group_id
+JOIN googleads.{account}.campaign c ON s.campaign_id = c.campaign_id
+WHERE s.segments_date >= today() - interval {days} day
+GROUP BY
+    ag.ad_group_id, ag.ad_group_name, c.campaign_id, c.campaign_name,
+    c.campaign_status, c.campaign_advertising_channel_type
+ORDER BY spend DESC
+"""
+
+
+def fetch_google_ad_data(days: int = 7) -> list[dict]:
+    """Fetch Google Ads ad-group level metrics for optimizer-style analysis."""
+    settings.require_posthog()
+    all_ads = []
+
+    for account in GOOGLE_ACCOUNTS:
+        query = GOOGLE_AD_METRICS_QUERY.format(account=account, days=days)
+        try:
+            result = run_hogql_query(query)
+            columns = result["columns"]
+            for row in result["rows"]:
+                ad = dict(zip(columns, row))
+                ad["platform"] = "google"
+                all_ads.append(ad)
+        except Exception as e:
+            logger.warning("Failed to fetch Google ads from %s: %s", account, e)
+
+    logger.info("Fetched %d Google ad rows from PostHog", len(all_ads))
+    return all_ads
+
+
 # ── Meta Ads campaign query ───────────────────────────────────
 
 META_CAMPAIGN_METRICS_QUERY = """
@@ -239,6 +291,56 @@ def fetch_meta_campaign_data(days: int = 7) -> list[dict]:
 
     logger.info("Fetched %d Meta campaigns from PostHog", len(all_campaigns))
     return all_campaigns
+
+
+META_AD_METRICS_QUERY = """
+SELECT
+    a.id AS ad_id,
+    a.name AS ad_name,
+    c.id AS campaign_id,
+    c.name AS campaign_name,
+    c.effective_status AS campaign_status,
+    c.objective AS ad_format,
+    round(SUM(toFloat(s.spend)), 2) AS spend,
+    SUM(toInt(s.impressions)) AS impressions,
+    SUM(toInt(s.clicks)) AS clicks,
+    CASE WHEN SUM(toInt(s.impressions)) > 0
+         THEN round(SUM(toInt(s.clicks)) * 100.0 / SUM(toInt(s.impressions)), 4)
+         ELSE 0 END AS ctr,
+    0 AS conversions,
+    0 AS cpa,
+    round(AVG(toFloat(s.frequency)), 2) AS meta_frequency,
+    COUNT(DISTINCT s.date_start) AS days_active,
+    '{account}' AS account
+FROM {account}metaads_ad_stats s
+JOIN {account}metaads_ads a ON s.ad_id = a.id
+JOIN {account}metaads_adsets adset ON a.adset_id = adset.id
+JOIN {account}metaads_campaigns c ON adset.campaign_id = c.id
+WHERE s.date_start >= toString(today() - interval {days} day)
+GROUP BY a.id, a.name, c.id, c.name, c.effective_status, c.objective
+ORDER BY spend DESC
+"""
+
+
+def fetch_meta_ad_data(days: int = 7) -> list[dict]:
+    """Fetch Meta Ads ad-level metrics for optimizer-style analysis."""
+    settings.require_posthog()
+    all_ads = []
+
+    for account in META_ACCOUNTS:
+        query = META_AD_METRICS_QUERY.format(account=account, days=days)
+        try:
+            result = run_hogql_query(query)
+            columns = result["columns"]
+            for row in result["rows"]:
+                ad = dict(zip(columns, row))
+                ad["platform"] = "meta"
+                all_ads.append(ad)
+        except Exception as e:
+            logger.warning("Failed to fetch Meta ads from %s: %s", account, e)
+
+    logger.info("Fetched %d Meta ad rows from PostHog", len(all_ads))
+    return all_ads
 
 
 # ── Converter helpers (same pattern as composio_fetch.py) ────
@@ -363,16 +465,20 @@ def load_posthog_data(days: int = 7, platform: str = "all") -> dict:
         platform: "all" (default), "google", or "meta".
     """
     raw = []
+    raw_ads = []
     if platform in ("all", "google"):
         raw.extend(fetch_campaign_data(days=days))
+        raw_ads.extend(fetch_google_ad_data(days=days))
     if platform in ("all", "meta"):
         raw.extend(fetch_meta_campaign_data(days=days))
+        raw_ads.extend(fetch_meta_ad_data(days=days))
     return {
         "health": to_ad_health(raw),
         "guardian": to_ad_metrics(raw),
         "content_lab": to_ad_performance(raw),
         "copy_writer": to_ad_with_copy(raw),
         "raw": raw,
+        "raw_ads": raw_ads,
     }
 
 
@@ -414,6 +520,7 @@ if __name__ == "__main__":
         google_count = sum(1 for c in data["raw"] if c.get("platform") == "google")
         meta_count = sum(1 for c in data["raw"] if c.get("platform") == "meta")
         print(f"\nCampaigns fetched: {len(data['raw'])} (Google: {google_count}, Meta: {meta_count})")
+        print(f"Ad rows fetched:   {len(data['raw_ads'])}")
         print(f"  Health entries:    {len(data['health'])}")
         print(f"  Guardian entries:  {len(data['guardian'])}")
         print(f"  Content lab:       {len(data['content_lab'])}")
